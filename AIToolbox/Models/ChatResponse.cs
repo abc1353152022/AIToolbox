@@ -4,6 +4,9 @@ namespace AIToolbox.Models;
 
 public class ChatResponse
 {
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
     [JsonPropertyName("model")]
     public string Model { get; set; } = string.Empty;
 

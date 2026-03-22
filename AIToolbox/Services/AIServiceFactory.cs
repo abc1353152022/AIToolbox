@@ -1,4 +1,5 @@
-﻿using Microsoft.Extensions.DependencyInjection;
+using AIToolbox.Models;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AIToolbox.Services;
 
@@ -16,6 +17,7 @@ public static class AIServiceFactory
         Aitools,
         DeepSeek,
         OpenAI,
+        GenericHttp,  // 添加通用HTTP提供商支持
         // Anthropic,  // 未来添加
     }
 
@@ -52,6 +54,14 @@ public static class AIServiceFactory
     }
 
     /// <summary>
+    /// 创建通用HTTP服务实例
+    /// </summary>
+    public static GenericHttpService CreateGenericHttp(HttpClient httpClient, GenericProviderConfig config)
+    {
+        return new GenericHttpService(httpClient, config);
+    }
+
+    /// <summary>
     /// 根据配置创建服务
     /// </summary>
     public static IAIService Create(HttpClient httpClient, string provider, Dictionary<string, string> config)
@@ -78,7 +88,35 @@ public static class AIServiceFactory
                 config.GetValueOrDefault("baseUrl"),
                 config.GetValueOrDefault("apiKey")),
 
+            "generic-http" => CreateGenericHttpService(httpClient, config),
+
             _ => throw new NotSupportedException($"提供商 '{provider}' 暂不支持")
         };
+    }
+
+    private static GenericHttpService CreateGenericHttpService(HttpClient httpClient, Dictionary<string, string> config)
+    {
+        // For generic-http, we expect the configuration to be more complex
+        // In a full implementation, we would deserialize the config into GenericProviderConfig
+        // For now, we'll create a basic config from the simple dictionary
+        var genericConfig = new GenericProviderConfig
+        {
+            BaseUrl = config.GetValueOrDefault("baseUrl") ?? string.Empty,
+            ApiKey = config.GetValueOrDefault("apiKey"),
+            SupportsStreaming = bool.Parse(config.GetValueOrDefault("supportsStreaming") ?? "true")
+        };
+
+        // Handle endpoints if provided
+        if (config.ContainsKey("endpointsChat") || config.ContainsKey("endpointsStreaming") || config.ContainsKey("endpointsModels"))
+        {
+            genericConfig.Endpoints = new GenericProviderEndpoints
+            {
+                Chat = config.GetValueOrDefault("endpointsChat") ?? "/v1/chat/completions",
+                Streaming = config.GetValueOrDefault("endpointsStreaming") ?? "/v1/chat/completions",
+                Models = config.GetValueOrDefault("endpointsModels") ?? "/v1/models"
+            };
+        }
+
+        return new GenericHttpService(httpClient, genericConfig);
     }
 }

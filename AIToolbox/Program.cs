@@ -5,6 +5,10 @@ using AIToolbox.Services;
 using AIToolbox.Utils;
 using Microsoft.Extensions.DependencyInjection;
 
+#if WINDOWSEXCEPTIONS
+using System.Windows.Forms;
+#endif
+
 namespace AIToolbox;
 
 class Program
@@ -22,6 +26,7 @@ class Program
     private static AitoolsService? _aitoolsService;
     private static DeepSeekService? _deepseekService;
     private static OpenAIService? _openaiService;
+    private static GenericHttpService? _genericHttpService;
 
     // 统计信息
     private static int _totalTokens;
@@ -70,6 +75,7 @@ class Program
         _aitoolsService = AIServiceFactory.CreateAitools(httpClient);
         _deepseekService = AIServiceFactory.CreateDeepSeek(httpClient);
         _openaiService = AIServiceFactory.CreateOpenAI(httpClient);
+        _genericHttpService = AIServiceFactory.CreateGenericHttp(httpClient, new GenericProviderConfig());
     }
 
     static void LoadConfiguration()
@@ -106,6 +112,7 @@ class Program
         "aitools" => _aitoolsService,
         "deepseek" => _deepseekService,
         "openai" => _openaiService,
+        "generic-http" => _genericHttpService,
         _ => null
     };
 
@@ -119,7 +126,8 @@ class Program
             ("ollama", "Ollama", "localhost:11434", _appSettings.Providers.ContainsKey("ollama")),
             ("aitools", "AITools", "api.aitools.cfd", _appSettings.Providers.ContainsKey("aitools")),
             ("deepseek", "DeepSeek", "api.deepseek.com", _appSettings.Providers.ContainsKey("deepseek")),
-            ("openai", "OpenAI", "api.openai.com", _appSettings.Providers.ContainsKey("openai"))
+            ("openai", "OpenAI", "api.openai.com", _appSettings.Providers.ContainsKey("openai")),
+            ("generic-http", "自定义 HTTP", "可配置", _appSettings.Providers.ContainsKey("generic-http"))
         };
 
         for (int i = 0; i < providers.Count; i++)
@@ -159,14 +167,31 @@ class Program
 
     static void ConfigureProvider(string providerId)
     {
-        if (_appSettings.Providers.TryGetValue(providerId, out var config) && !string.IsNullOrEmpty(config.ApiKey))
+        if (_appSettings.Providers.TryGetValue(providerId, out var config))
         {
-            _aiService?.UpdateConfig(new Dictionary<string, string>
+            if (providerId == "generic-http" && config.GenericConfig != null)
             {
-                ["apiKey"] = config.ApiKey,
-                ["baseUrl"] = config.BaseUrl ?? GetDefaultBaseUrl(providerId)
-            });
-            ConsoleHelper.WriteLineColored("   已加载配置文件中的 API Key", ConsoleColor.DarkGray);
+                // Configure generic HTTP provider with its full configuration
+                _aiService?.UpdateConfig(new Dictionary<string, string>
+                {
+                    ["apiKey"] = config.GenericConfig.ApiKey ?? string.Empty,
+                    ["baseUrl"] = config.GenericConfig.BaseUrl,
+                    ["supportsStreaming"] = config.GenericConfig.SupportsStreaming.ToString()
+                });
+
+                // Additional configuration could be passed here if needed
+                ConsoleHelper.WriteLineColored("   已加载自定义 HTTP 提供商配置", ConsoleColor.DarkGray);
+            }
+            else if (!string.IsNullOrEmpty(config.ApiKey))
+            {
+                // Standard provider configuration
+                _aiService?.UpdateConfig(new Dictionary<string, string>
+                {
+                    ["apiKey"] = config.ApiKey,
+                    ["baseUrl"] = config.BaseUrl ?? GetDefaultBaseUrl(providerId)
+                });
+                ConsoleHelper.WriteLineColored("   已加载配置文件中的 API Key", ConsoleColor.DarkGray);
+            }
         }
     }
 
@@ -176,6 +201,7 @@ class Program
         "aitools" => "https://platform.aitools.cfd",
         "deepseek" => "https://api.deepseek.com",
         "openai" => "https://api.openai.com",
+        "generic-http" => "可配置",
         _ => ""
     };
 
@@ -282,23 +308,36 @@ class Program
         ConsoleHelper.WriteLineColored("  /stats    - 显示统计信息", ConsoleColor.White);
         ConsoleHelper.WriteLineColored("  /history  - 显示对话历史", ConsoleColor.White);
         ConsoleHelper.WriteLineColored("  /copy     - 复制上次回复", ConsoleColor.White);
-        ConsoleHelper.WriteLineColored("  /export   - 导出对话历史", ConsoleColor.White);
+        ConsoleHelper.WriteLineColored("  /export   - 导出对话历史 (JSON/MD/HTML)", ConsoleColor.White);
+        ConsoleHelper.WriteLineColored("  /import   - 导入对话历史", ConsoleColor.White);
         ConsoleHelper.WriteLineColored("  /help     - 显示帮助", ConsoleColor.White);
         ConsoleHelper.WriteLineColored("  /quit     - 退出程序", ConsoleColor.White);
+        ConsoleHelper.WriteLineColored("  [Shift+Enter] - 多行输入", ConsoleColor.DarkGray);
+        ConsoleHelper.WriteLineColored("  [Tab]       - 命令补全", ConsoleColor.DarkGray);
+        ConsoleHelper.WriteLineColored("  [↑/↓]       - 历史消息导航", ConsoleColor.DarkGray);
         Console.WriteLine();
     }
 
     static string? _lastAssistantMessage;
+    private static List<string> _inputHistory = new();
 
     static async Task MainLoopAsync()
     {
         while (true)
         {
-            ConsoleHelper.WriteColored("\n您: ", ConsoleColor.Green);
-            var input = Console.ReadLine()?.Trim();
+            var input = ConsoleHelper.ReadInputAdvanced("\n您: ", ConsoleColor.Green, _inputHistory)?.Trim();
 
             if (string.IsNullOrEmpty(input))
                 continue;
+
+            // 添加到输入历史（非命令）
+            if (!input.StartsWith("/"))
+            {
+                _inputHistory.Add(input);
+                // 限制历史记录数量
+                if (_inputHistory.Count > 50)
+                    _inputHistory.RemoveAt(0);
+            }
 
             if (input.StartsWith("/"))
             {
@@ -521,28 +560,15 @@ class Program
                 break;
 
             case "/copy":
-                if (!string.IsNullOrEmpty(_lastAssistantMessage))
-                {
-                    try
-                    {
-                        var tempFile = Path.GetTempFileName();
-                        File.WriteAllText(tempFile, _lastAssistantMessage);
-                        File.Copy(tempFile, "last_response.txt", true);
-                        ConsoleHelper.WriteLineColored("✅ 已保存到 last_response.txt", ConsoleColor.Green);
-                    }
-                    catch
-                    {
-                        ConsoleHelper.WriteLineColored("复制失败", ConsoleColor.Red);
-                    }
-                }
-                else
-                {
-                    ConsoleHelper.WriteLineColored("没有可复制的内容", ConsoleColor.Yellow);
-                }
+                CopyLastResponse();
                 break;
 
             case "/export":
                 ExportConversation();
+                break;
+
+            case "/import":
+                ImportConversation();
                 break;
 
             case "/help":
@@ -561,22 +587,216 @@ class Program
         }
     }
 
+    static void CopyLastResponse()
+    {
+        if (string.IsNullOrEmpty(_lastAssistantMessage))
+        {
+            ConsoleHelper.WriteLineColored("没有可复制的内容", ConsoleColor.Yellow);
+            return;
+        }
+
+        try
+        {
+            // 尝试使用剪贴板复制
+            if (ConsoleHelper.CopyToClipboard(_lastAssistantMessage))
+            {
+                ConsoleHelper.WriteLineColored("✅ 已复制到剪贴板！", ConsoleColor.Green);
+            }
+            else
+            {
+                // 剪贴板复制失败，回退到文件保存
+                var tempFile = Path.GetTempFileName();
+                File.WriteAllText(tempFile, _lastAssistantMessage);
+                File.Copy(tempFile, "last_response.txt", true);
+                ConsoleHelper.WriteLineColored("⚠️  剪贴板复制失败，已保存到 last_response.txt", ConsoleColor.Yellow);
+            }
+        }
+        catch (Exception ex)
+        {
+            ConsoleHelper.WriteLineColored($"❌ 复制失败: {ex.Message}", ConsoleColor.Red);
+        }
+    }
+
     static void ExportConversation()
     {
-        var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-        var filename = $"conversation_{timestamp}.json";
+        ConsoleHelper.WriteLineColored("选择导出格式:", ConsoleColor.Cyan);
+        ConsoleHelper.WriteLineColored("  1. JSON  - 原始数据格式", ConsoleColor.White);
+        ConsoleHelper.WriteLineColored("  2. Markdown - 可读性好，适合分享", ConsoleColor.White);
+        ConsoleHelper.WriteLineColored("  3. HTML  - 格式化网页", ConsoleColor.White);
+        Console.WriteLine();
 
-        var exportData = new
+        var input = ConsoleHelper.ReadInput("请输入选项 (1-3): ", ConsoleColor.Green);
+        var format = input.Trim() switch
         {
-            provider = _currentProvider,
-            model = _currentModel,
-            exportedAt = DateTime.Now,
-            messages = _conversationHistory
+            "2" => "md",
+            "3" => "html",
+            _ => "json"
         };
 
-        var json = JsonSerializer.Serialize(exportData, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(filename, json);
+        var timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        string filename;
+
+        switch (format)
+        {
+            case "md":
+                filename = $"conversation_{timestamp}.md";
+                var markdownContent = ConsoleHelper.ExportToMarkdown(_conversationHistory, _currentProvider!, _currentModel!);
+                File.WriteAllText(filename, markdownContent, Encoding.UTF8);
+                break;
+            case "html":
+                filename = $"conversation_{timestamp}.html";
+                var htmlContent = ConsoleHelper.ExportToHtml(_conversationHistory, _currentProvider!, _currentModel!);
+                File.WriteAllText(filename, htmlContent, Encoding.UTF8);
+                break;
+            default:
+                filename = $"conversation_{timestamp}.json";
+                var exportData = new
+                {
+                    provider = _currentProvider,
+                    model = _currentModel,
+                    exportedAt = DateTime.Now,
+                    messages = _conversationHistory
+                };
+                var json = JsonSerializer.Serialize(exportData, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(filename, json);
+                break;
+        }
 
         ConsoleHelper.WriteLineColored($"✅ 对话已导出到: {filename}", ConsoleColor.Green);
+    }
+
+    static void ImportConversation()
+    {
+        ConsoleHelper.WriteLineColored("拖入要导入的对话文件，或输入文件路径:", ConsoleColor.Cyan);
+        var filepath = ConsoleHelper.ReadInput("文件路径: ", ConsoleColor.Green).Trim();
+
+        // 移除引号（如果用户拖入文件）
+        filepath = filepath.Trim('"', '\'');
+
+        if (!File.Exists(filepath))
+        {
+            ConsoleHelper.WriteLineColored($"❌ 文件不存在: {filepath}", ConsoleColor.Red);
+            return;
+        }
+
+        try
+        {
+            var content = File.ReadAllText(filepath);
+            var ext = Path.GetExtension(filepath).ToLower();
+
+            List<AIToolbox.Models.Message> importedMessages;
+
+            if (ext == ".json")
+            {
+                var data = JsonSerializer.Deserialize<ImportData>(content);
+                if (data?.messages != null)
+                {
+                    importedMessages = data.messages;
+                }
+                else
+                {
+                    ConsoleHelper.WriteLineColored("❌ 无效的 JSON 格式", ConsoleColor.Red);
+                    return;
+                }
+            }
+            else if (ext == ".md" || ext == ".html")
+            {
+                // 简单解析 Markdown/HTML 文件
+                importedMessages = ParseMarkdownHtmlConversation(content, ext);
+                if (importedMessages == null || importedMessages.Count == 0)
+                {
+                    ConsoleHelper.WriteLineColored("❌ 无法解析对话内容", ConsoleColor.Red);
+                    return;
+                }
+            }
+            else
+            {
+                ConsoleHelper.WriteLineColored("❌ 不支持的文件格式 (仅支持 .json, .md, .html)", ConsoleColor.Red);
+                return;
+            }
+
+            // 确认导入
+            ConsoleHelper.WriteLineColored($"\n(found {importedMessages.Count} 条消息)", ConsoleColor.DarkGray);
+            var confirm = ConsoleHelper.ReadInput("确定要导入并覆盖当前对话吗? (y/n): ", ConsoleColor.Yellow);
+
+            if (confirm.ToLower() == "y")
+            {
+                _conversationHistory = importedMessages;
+                _lastAssistantMessage = importedMessages.LastOrDefault(m => m.Role == "assistant")?.Content;
+                ConsoleHelper.WriteLineColored("✅ 对话导入成功！", ConsoleColor.Green);
+            }
+        }
+        catch (Exception ex)
+        {
+            ConsoleHelper.WriteLineColored($"❌ 导入失败: {ex.Message}", ConsoleColor.Red);
+        }
+    }
+
+    static List<Message> ParseMarkdownHtmlConversation(string content, string format)
+    {
+        var messages = new List<Message>();
+
+        if (format == ".md")
+        {
+            // 解析 Markdown 格式
+            var lines = content.Split('\n');
+            var currentRole = "";
+            var currentContent = new StringBuilder();
+
+            foreach (var line in lines)
+            {
+                if (line.StartsWith("## 👤 您") || line.StartsWith("## 🤖 AI"))
+                {
+                    if (!string.IsNullOrEmpty(currentRole))
+                    {
+                        messages.Add(new Message { Role = currentRole, Content = currentContent.ToString().Trim() });
+                        currentContent.Clear();
+                    }
+                    currentRole = line.Contains("👤 您") ? "user" : "assistant";
+                }
+                else if (!string.IsNullOrEmpty(currentRole) && !line.StartsWith("#") && !line.StartsWith("---"))
+                {
+                    currentContent.AppendLine(line);
+                }
+            }
+
+            if (!string.IsNullOrEmpty(currentRole) && currentContent.Length > 0)
+            {
+                messages.Add(new Message { Role = currentRole, Content = currentContent.ToString().Trim() });
+            }
+        }
+        else if (format == ".html")
+        {
+            // 简单解析 HTML 格式
+            var messageDivs = content.Split(new[] { "<div class=\"message" }, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var div in messageDivs)
+            {
+                var isUser = div.Contains("class=\"message user\"");
+                var role = isUser ? "user" : "assistant";
+
+                var contentStart = div.IndexOf("<div class=\"content\">");
+                if (contentStart > 0)
+                {
+                    contentStart += "<div class=\"content\">".Length;
+                    var contentEnd = div.IndexOf("</div>", contentStart);
+                    if (contentEnd > contentStart)
+                    {
+                        var msgContent = div.Substring(contentStart, contentEnd - contentStart);
+                        messages.Add(new Message { Role = role, Content = msgContent });
+                    }
+                }
+            }
+        }
+
+        return messages;
+    }
+
+    class ImportData
+    {
+        public string? provider { get; set; }
+        public string? model { get; set; }
+        public DateTime exportedAt { get; set; }
+        public List<Message>? messages { get; set; }
     }
 }
